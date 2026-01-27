@@ -5,11 +5,12 @@ import time
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Callable, Dict, Optional
 
 from src.adspower import AdsPowerClient
 from src.browser import BrowserSession
 from .tasks import Task, TaskResult
+from .circuit_breaker import CircuitBreaker, get_circuit_breaker, ProfileState
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +22,18 @@ class TaskRunner:
     - Artifact collection
     - Structured logging
     - Error handling
+    - Circuit breaker integration (blocked detection → cooldown)
     """
 
-    def __init__(self, artifacts_dir: str = "artifacts"):
+    def __init__(
+        self, 
+        artifacts_dir: str = "artifacts",
+        circuit_breaker: Optional[CircuitBreaker] = None,
+    ):
         self.artifacts_dir = Path(artifacts_dir)
         self.adspower = AdsPowerClient()
         self._handlers: Dict[str, Callable] = {}
+        self.circuit_breaker = circuit_breaker or get_circuit_breaker()
 
         # Register built-in handlers
         self._register_builtins()
@@ -46,6 +53,18 @@ class TaskRunner:
             started_at=started_at.isoformat() + "Z",
         )
 
+        # Check circuit breaker FIRST
+        can_run, cooldown_reason = self.circuit_breaker.can_run(task.profile_id)
+        if not can_run:
+            result.error = f"Circuit breaker: {cooldown_reason}"
+            result.metrics = {
+                "skipped": True,
+                "skip_reason": "circuit_breaker",
+                "profile_status": self.circuit_breaker.get_status(task.profile_id).to_dict(),
+            }
+            logger.warning(f"Task skipped for {task.profile_id}: {cooldown_reason}")
+            return self._finalize(result, start_time)
+
         # Create artifact directory for this run
         artifact_path = self._artifact_path(task.profile_id, started_at)
         artifact_path.mkdir(parents=True, exist_ok=True)
@@ -63,13 +82,36 @@ class TaskRunner:
                     task.params,
                     artifact_path,
                 )
-                result.success = True
                 result.metrics = metrics
                 result.artifacts = [str(a) for a in artifacts]
+                
+                # Check if blocked and update circuit breaker
+                if metrics.get("blocked"):
+                    block_reason = metrics.get("block_reason", "unknown")
+                    status = self.circuit_breaker.record_block(
+                        task.profile_id, 
+                        reason=block_reason
+                    )
+                    result.success = False  # Blocked = not successful
+                    result.error = f"Blocked: {block_reason}"
+                    
+                    # Add circuit breaker status to metrics
+                    result.metrics["profile_status"] = status.to_dict()
+                    
+                    logger.warning(
+                        f"Profile {task.profile_id} blocked. "
+                        f"State: {status.state.value}, "
+                        f"Consecutive: {status.consecutive_blocks}"
+                    )
+                else:
+                    # Success - record it
+                    self.circuit_breaker.record_success(task.profile_id)
+                    result.success = True
 
         except Exception as e:
             logger.exception(f"Task failed: {e}")
             result.error = str(e)
+            # Don't record as block - this is a technical failure, not a captcha
 
         return self._finalize(result, start_time)
 
