@@ -13,9 +13,10 @@ logger = logging.getLogger(__name__)
 
 class ProfileState(Enum):
     """Profile health states"""
-    HEALTHY = "healthy"    
-    COOLING = "cooling"      
-    FLAGGED = "flagged"      
+    HEALTHY = "healthy"         
+    COOLING = "cooling"           # In cooldown period  
+    NEEDS_HUMAN = "needs_human"   # ClawdHub intervention required
+    DISABLED = "disabled"         # Profile should not be used      
 
 
 @dataclass
@@ -24,10 +25,14 @@ class ProfileStatus:
     profile_id: str
     state: ProfileState = ProfileState.HEALTHY
     consecutive_blocks: int = 0
+    consecutive_failures: int = 0  
     total_blocks: int = 0
+    total_tasks: int = 0
     last_block_at: Optional[datetime] = None
     cooldown_until: Optional[datetime] = None
-    flagged_at: Optional[datetime] = None
+    needs_human_at: Optional[datetime] = None  
+    disabled_at: Optional[datetime] = None 
+    disabled_reason: Optional[str] = None
     last_success_at: Optional[datetime] = None
     
     def to_dict(self) -> dict:
@@ -35,12 +40,27 @@ class ProfileStatus:
             "profile_id": self.profile_id,
             "state": self.state.value,
             "consecutive_blocks": self.consecutive_blocks,
+            "consecutive_failures": self.consecutive_failures,
             "total_blocks": self.total_blocks,
+            "total_tasks": self.total_tasks,
             "last_block_at": self.last_block_at.isoformat() if self.last_block_at else None,
             "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
-            "flagged_at": self.flagged_at.isoformat() if self.flagged_at else None,
+            "needs_human_at": self.needs_human_at.isoformat() if self.needs_human_at else None,
+            "disabled_at": self.disabled_at.isoformat() if self.disabled_at else None,
+            "disabled_reason": self.disabled_reason,
             "last_success_at": self.last_success_at.isoformat() if self.last_success_at else None,
         }
+    
+    @property
+    def next_action(self) -> str:
+        """Get the next action for scheduler based on current state"""
+        from .tasks import NextAction
+        return {
+            ProfileState.HEALTHY: NextAction.CONTINUE.value,
+            ProfileState.COOLING: NextAction.COOLDOWN.value,
+            ProfileState.NEEDS_HUMAN: NextAction.NEEDS_HUMAN.value,
+            ProfileState.DISABLED: NextAction.DISABLE_PROFILE.value,
+        }[self.state]
 
 
 @dataclass
@@ -96,9 +116,13 @@ class CircuitBreaker:
         status = self.get_status(profile_id)
         now = datetime.utcnow()
         
-        # Check if flagged
-        if status.state == ProfileState.FLAGGED:
-            return False, f"Profile flagged at {status.flagged_at}. Manual intervention required."
+        # Check if disabled
+        if status.state == ProfileState.DISABLED:
+            return False, f"Profile disabled: {status.disabled_reason}"
+        
+        # Check if needs human intervention
+        if status.state == ProfileState.NEEDS_HUMAN:
+            return False, f"Profile needs human intervention since {status.needs_human_at}"
         
         # Check if in cooldown
         if status.state == ProfileState.COOLING:
@@ -117,14 +141,17 @@ class CircuitBreaker:
         """
         Record a block event for a profile.
         
-        This triggers cooldown or flagging based on consecutive blocks.
+        This triggers cooldown or NEEDS_HUMAN based on consecutive blocks.
         """
         status = self.get_status(profile_id)
         now = datetime.utcnow()
         
         status.consecutive_blocks += 1
         status.total_blocks += 1
+        status.total_tasks += 1
         status.last_block_at = now
+        # Reset failure count on block (different failure mode)
+        status.consecutive_failures = 0
         
         logger.warning(
             f"Profile {profile_id} blocked (#{status.consecutive_blocks}). Reason: {reason}"
@@ -132,11 +159,11 @@ class CircuitBreaker:
         
         # Determine action based on consecutive blocks
         if status.consecutive_blocks >= self.config.max_consecutive_blocks:
-            # Flag for manual intervention
-            status.state = ProfileState.FLAGGED
-            status.flagged_at = now
+            # Needs human intervention (ClawdHub)
+            status.state = ProfileState.NEEDS_HUMAN
+            status.needs_human_at = now
             logger.error(
-                f"Profile {profile_id} FLAGGED after {status.consecutive_blocks} consecutive blocks"
+                f"Profile {profile_id} NEEDS_HUMAN after {status.consecutive_blocks} consecutive blocks"
             )
         else:
             # Apply cooldown with exponential backoff
@@ -149,6 +176,31 @@ class CircuitBreaker:
         
         return status
     
+    def record_failure(self, profile_id: str, error: str = None) -> ProfileStatus:
+        """
+        Record a technical failure (not a block).
+        
+        5 consecutive failures → DISABLED
+        """
+        status = self.get_status(profile_id)
+        now = datetime.utcnow()
+        
+        status.consecutive_failures += 1
+        status.total_tasks += 1
+        
+        logger.warning(
+            f"Profile {profile_id} failed (#{status.consecutive_failures}). Error: {error}"
+        )
+        
+        # 5 consecutive failures → disable
+        if status.consecutive_failures >= 5:
+            status.state = ProfileState.DISABLED
+            status.disabled_at = now
+            status.disabled_reason = f"5 consecutive failures. Last: {error}"
+            logger.error(f"Profile {profile_id} DISABLED after 5 consecutive failures")
+        
+        return status
+    
     def record_success(self, profile_id: str) -> ProfileStatus:
         """
         Record a successful task for a profile.
@@ -157,6 +209,10 @@ class CircuitBreaker:
         """
         status = self.get_status(profile_id)
         status.last_success_at = datetime.utcnow()
+        status.total_tasks += 1
+        
+        # Reset failure count
+        status.consecutive_failures = 0
         
         # Gradually decrease consecutive_blocks on success
         if status.consecutive_blocks > 0:
@@ -172,21 +228,53 @@ class CircuitBreaker:
         
         return status
     
-    def unflag(self, profile_id: str) -> ProfileStatus:
+    def resolve_human(self, profile_id: str) -> ProfileStatus:
         """
-        Manually unflag a profile (after human intervention).
+        Mark profile as resolved after human intervention (ClawdHub).
         
         Resets the profile to healthy state.
         """
         status = self.get_status(profile_id)
         
-        if status.state == ProfileState.FLAGGED:
+        if status.state == ProfileState.NEEDS_HUMAN:
             status.state = ProfileState.HEALTHY
             status.consecutive_blocks = 0
-            status.cooldown_until = None
-            logger.info(f"Profile {profile_id} manually unflagged")
+            status.needs_human_at = None
+            logger.info(f"Profile {profile_id} resolved by human, now healthy")
         
         return status
+    
+    def disable(self, profile_id: str, reason: str) -> ProfileStatus:
+        """
+        Manually disable a profile.
+        """
+        status = self.get_status(profile_id)
+        status.state = ProfileState.DISABLED
+        status.disabled_at = datetime.utcnow()
+        status.disabled_reason = reason
+        logger.info(f"Profile {profile_id} disabled: {reason}")
+        return status
+    
+    def enable(self, profile_id: str) -> ProfileStatus:
+        """
+        Re-enable a disabled profile.
+        """
+        status = self.get_status(profile_id)
+        
+        if status.state == ProfileState.DISABLED:
+            status.state = ProfileState.HEALTHY
+            status.disabled_at = None
+            status.disabled_reason = None
+            status.consecutive_blocks = 0
+            status.consecutive_failures = 0
+            logger.info(f"Profile {profile_id} re-enabled")
+        
+        return status
+    
+    # Keep unflag as alias for backwards compatibility
+    def unflag(self, profile_id: str) -> ProfileStatus:
+        """Alias for resolve_human (backwards compatibility)"""
+        return self.resolve_human(profile_id)
     
     def _calculate_cooldown(self, consecutive_blocks: int) -> int:
         """Calculate cooldown duration with jitter"""
@@ -203,11 +291,18 @@ class CircuitBreaker:
         """Get status of all tracked profiles"""
         return {pid: status.to_dict() for pid, status in self._profiles.items()}
     
-    def get_flagged_profiles(self) -> list[str]:
-        """Get list of flagged profile IDs"""
+    def get_needs_human_profiles(self) -> list[str]:
+        """Get list of profiles needing human intervention"""
         return [
             pid for pid, status in self._profiles.items()
-            if status.state == ProfileState.FLAGGED
+            if status.state == ProfileState.NEEDS_HUMAN
+        ]
+    
+    def get_disabled_profiles(self) -> list[str]:
+        """Get list of disabled profiles"""
+        return [
+            pid for pid, status in self._profiles.items()
+            if status.state == ProfileState.DISABLED
         ]
     
     def get_cooling_profiles(self) -> list[str]:
@@ -218,6 +313,17 @@ class CircuitBreaker:
             if status.state == ProfileState.COOLING and 
                status.cooldown_until and now < status.cooldown_until
         ]
+    
+    def get_healthy_profiles(self) -> list[str]:
+        """Get list of healthy profiles ready for tasks"""
+        return [
+            pid for pid, status in self._profiles.items()
+            if status.state == ProfileState.HEALTHY
+        ]
+    
+    def get_flagged_profiles(self) -> list[str]:
+        """Alias for get_needs_human_profiles"""
+        return self.get_needs_human_profiles()
 
 
 # Global instance for convenience

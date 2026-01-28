@@ -5,3 +5,7 @@ openai>=1.0.0
 # (urllib3 v2 requires OpenSSL 1.1.1+, macOS ships LibreSSL)
 urllib3<2.0.0
 pytest>=7.0.0
+# HTTP Server
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0

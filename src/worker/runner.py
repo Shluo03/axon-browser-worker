@@ -1,6 +1,5 @@
 """Task runner - executes tasks with proper lifecycle"""
 
-import os
 import time
 import logging
 from datetime import datetime
@@ -9,7 +8,7 @@ from typing import Callable, Dict, Optional
 
 from src.adspower import AdsPowerClient
 from src.browser import BrowserSession
-from .tasks import Task, TaskResult
+from .tasks import Task, TaskResult, NextAction
 from .circuit_breaker import CircuitBreaker, get_circuit_breaker, ProfileState
 
 logger = logging.getLogger(__name__)
@@ -23,6 +22,7 @@ class TaskRunner:
     - Structured logging
     - Error handling
     - Circuit breaker integration (blocked detection → cooldown)
+    - Full task contract compliance (next_action, profile_status)
     """
 
     def __init__(
@@ -43,24 +43,36 @@ class TaskRunner:
         self._handlers[task_type] = handler
 
     def run(self, task: Task) -> TaskResult:
-        """Execute a task and return result"""
+        """
+        Execute a task and return result with full contract compliance.
+        
+        Returns TaskResult with:
+        - success: bool
+        - blocked: bool  
+        - block_reason: str
+        - next_action: continue/cooldown/needs_human/disable_profile
+        - profile_status: current state of profile
+        """
         started_at = datetime.utcnow()
         start_time = time.time()
 
+        # Initialize result
         result = TaskResult(
-            success=False,
             task_id=task.task_id,
+            success=False,
             started_at=started_at.isoformat() + "Z",
         )
 
         # Check circuit breaker FIRST
         can_run, cooldown_reason = self.circuit_breaker.can_run(task.profile_id)
         if not can_run:
+            status = self.circuit_breaker.get_status(task.profile_id)
             result.error = f"Circuit breaker: {cooldown_reason}"
+            result.next_action = status.next_action
+            result.profile_status = status.to_dict()
             result.metrics = {
                 "skipped": True,
                 "skip_reason": "circuit_breaker",
-                "profile_status": self.circuit_breaker.get_status(task.profile_id).to_dict(),
             }
             logger.warning(f"Task skipped for {task.profile_id}: {cooldown_reason}")
             return self._finalize(result, start_time)
@@ -72,6 +84,7 @@ class TaskRunner:
         handler = self._handlers.get(task.task_type)
         if not handler:
             result.error = f"Unknown task_type: {task.task_type}"
+            result.next_action = NextAction.CONTINUE.value
             return self._finalize(result, start_time)
 
         try:
@@ -92,26 +105,34 @@ class TaskRunner:
                         task.profile_id, 
                         reason=block_reason
                     )
-                    result.success = False  # Blocked = not successful
-                    result.error = f"Blocked: {block_reason}"
                     
-                    # Add circuit breaker status to metrics
-                    result.metrics["profile_status"] = status.to_dict()
+                    result.success = False
+                    result.blocked = True
+                    result.block_reason = block_reason
+                    result.next_action = status.next_action
+                    result.profile_status = status.to_dict()
                     
                     logger.warning(
                         f"Profile {task.profile_id} blocked. "
                         f"State: {status.state.value}, "
-                        f"Consecutive: {status.consecutive_blocks}"
+                        f"next_action: {result.next_action}"
                     )
                 else:
                     # Success - record it
-                    self.circuit_breaker.record_success(task.profile_id)
+                    status = self.circuit_breaker.record_success(task.profile_id)
                     result.success = True
+                    result.blocked = False
+                    result.next_action = NextAction.CONTINUE.value
+                    result.profile_status = status.to_dict()
 
         except Exception as e:
             logger.exception(f"Task failed: {e}")
             result.error = str(e)
-            # Don't record as block - this is a technical failure, not a captcha
+            
+            # Record technical failure
+            status = self.circuit_breaker.record_failure(task.profile_id, str(e))
+            result.next_action = status.next_action
+            result.profile_status = status.to_dict()
 
         return self._finalize(result, start_time)
 

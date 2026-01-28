@@ -1,0 +1,29 @@
+{
+  "metrics": {
+    "url": "https://www.instagram.com",
+    "final_url": "https://www.instagram.com/",
+    "title": "Instagram",
+    "blocked": false,
+    "block_reason": null,
+    "page_fingerprint": {
+      "element_count": 502,
+      "link_count": 17,
+      "image_count": 1,
+      "form_count": 1,
+      "input_count": 3
+    }
+  },
+  "detection": {
+    "blocked": false,
+    "block_reason": null,
+    "final_url": "https://www.instagram.com/",
+    "page_title": "Instagram",
+    "page_fingerprint": {
+      "element_count": 502,
+      "link_count": 17,
+      "image_count": 1,
+      "form_count": 1,
+      "input_count": 3
+    }
+  }
+}

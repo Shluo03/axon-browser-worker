@@ -1,5 +1,5 @@
 from .runner import TaskRunner
-from .tasks import Task, TaskResult
+from .tasks import Task, TaskResult, TaskPolicy, NextAction, Platform, TaskType
 from .detection import detect_block, BlockDetector, BlockDetectionResult
 from .circuit_breaker import (
     CircuitBreaker,
@@ -9,12 +9,20 @@ from .circuit_breaker import (
 )
 
 __all__ = [
+    # Runner
     "TaskRunner",
+    # Task contract
     "Task",
-    "TaskResult",
+    "TaskResult", 
+    "TaskPolicy",
+    "NextAction",
+    "Platform",
+    "TaskType",
+    # Detection
     "detect_block",
     "BlockDetector",
     "BlockDetectionResult",
+    # Circuit breaker
     "CircuitBreaker",
     "ProfileState",
     "ProfileStatus",
