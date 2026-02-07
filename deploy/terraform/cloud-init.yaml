@@ -1,0 +1,178 @@
+#cloud-config
+# Cloud-init configuration for Axon Browser Worker
+# This runs automatically when the EC2 instance first boots
+
+package_update: true
+package_upgrade: true
+
+packages:
+  # Basic utilities
+  - curl
+  - wget
+  - git
+  - vim
+  - htop
+  - jq
+  - unzip
+  - tmux
+  # Python
+  - python3
+  - python3-pip
+  - python3-venv
+  # X11 / Virtual display
+  - xvfb
+  - x11vnc
+  - fluxbox
+  - xterm
+  # Chrome dependencies
+  - libnss3
+  - libatk1.0-0
+  - libatk-bridge2.0-0
+  - libcups2
+  - libdrm2
+  - libxkbcommon0
+  - libxcomposite1
+  - libxdamage1
+  - libxfixes3
+  - libxrandr2
+  - libgbm1
+  - libasound2
+  - libpango-1.0-0
+  - libcairo2
+  # Fonts (important for CJK)
+  - fonts-noto-cjk
+  - fonts-noto-color-emoji
+  # Docker
+  - docker.io
+  - docker-compose
+
+# Create axon user
+users:
+  - name: axon
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+
+# Create directories
+runcmd:
+  # Setup directories
+  - mkdir -p /opt/axon/browser-worker
+  - mkdir -p /opt/adspower
+  - mkdir -p /data/profiles
+  - mkdir -p /data/artifacts
+  - chown -R axon:axon /opt/axon /opt/adspower /data
+
+  # Enable Docker
+  - systemctl enable docker
+  - systemctl start docker
+
+  # Setup virtual display
+  - |
+    cat > /etc/systemd/system/xvfb.service << 'EOF'
+    [Unit]
+    Description=X Virtual Frame Buffer
+    After=network.target
+
+    [Service]
+    Type=simple
+    ExecStart=/usr/bin/Xvfb :99 -screen 0 1920x1080x24 -ac
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+  - systemctl daemon-reload
+  - systemctl enable xvfb
+  - systemctl start xvfb
+
+  # Setup VNC for debugging (optional)
+  - |
+    cat > /etc/systemd/system/x11vnc.service << 'EOF'
+    [Unit]
+    Description=X11 VNC Server
+    After=xvfb.service
+    Requires=xvfb.service
+
+    [Service]
+    Type=simple
+    Environment=DISPLAY=:99
+    ExecStart=/usr/bin/x11vnc -display :99 -forever -shared -rfbport 5900 -nopw
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+  - systemctl daemon-reload
+  - systemctl enable x11vnc
+  - systemctl start x11vnc
+
+  # Setup window manager
+  - |
+    cat > /etc/systemd/system/fluxbox.service << 'EOF'
+    [Unit]
+    Description=Fluxbox Window Manager
+    After=xvfb.service
+    Requires=xvfb.service
+
+    [Service]
+    Type=simple
+    User=axon
+    Environment=DISPLAY=:99
+    ExecStart=/usr/bin/fluxbox
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    EOF
+  - systemctl daemon-reload
+  - systemctl enable fluxbox
+  - systemctl start fluxbox
+
+  # Create environment file
+  - |
+    cat > /etc/profile.d/axon.sh << 'EOF'
+    export DISPLAY=:99
+    export PATH="/opt/axon/browser-worker/.venv/bin:$PATH"
+    EOF
+
+  # Signal completion
+  - touch /var/lib/cloud/instance/axon-init-complete
+  - echo "Cloud-init completed at $(date)" >> /var/log/axon-init.log
+
+# Write files
+write_files:
+  - path: /opt/axon/README.txt
+    content: |
+      Axon Browser Worker VM
+      ======================
+
+      Directories:
+        /opt/axon/browser-worker  - Browser worker code
+        /opt/adspower             - AdsPower installation
+        /data/profiles            - Browser profiles
+        /data/artifacts           - Task artifacts (screenshots, etc)
+
+      Virtual Display:
+        DISPLAY=:99
+        VNC port: 5900 (no password)
+
+      Next steps:
+        1. Install AdsPower manually (download from adspower.com)
+        2. Clone browser-worker repo to /opt/axon/browser-worker
+        3. Run: cd /opt/axon/browser-worker && ./deploy/scripts/setup-worker.sh
+
+      Services:
+        systemctl status xvfb
+        systemctl status x11vnc
+        systemctl status fluxbox
+        systemctl status browser-worker (after setup)
+    owner: axon:axon
+    permissions: '0644'
+
+final_message: |
+  Axon Browser Worker VM initialized!
+  Cloud-init completed in $UPTIME seconds.
+  Connect via: ssh ubuntu@<ip> or VNC on port 5900
