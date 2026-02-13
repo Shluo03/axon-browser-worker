@@ -1,0 +1,18 @@
+[Unit]
+Description=Axon Browser Worker
+After=network.target xvfb.service
+Wants=xvfb.service
+
+[Service]
+Type=simple
+User={{ axon_user }}
+Group={{ axon_user }}
+WorkingDirectory={{ project_dir }}
+Environment=DISPLAY=:99
+Environment=PATH={{ project_dir }}/.venv/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart={{ project_dir }}/.venv/bin/uvicorn src.server:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

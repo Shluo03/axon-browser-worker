@@ -116,8 +116,8 @@ class XiaohongshuPlatform(BasePlatform):
         Post a note.
 
         content: {
-            "message": "正文内容",
-            "title": "标题",  # optional
+            "message": "Post content",
+            "title": "Post title",  # optional
             "media": [{"path": "/path/to/image.jpg"}],  # optional
             "tags": ["tag1", "tag2"]  # optional
         }

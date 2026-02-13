@@ -1,0 +1,16 @@
+# Terraform
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/.terraform.lock.hcl
+terraform/terraform.tfvars
+terraform/crash.log
+
+# Ansible
+ansible/inventory.ini
+ansible/*.retry
+
+# Secrets
+*.pem
+*.key
+secrets/

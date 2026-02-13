@@ -1,0 +1,120 @@
+---
+# Ansible Playbook - Deploy Browser Worker to VMs
+#
+# Usage:
+#   ansible-playbook -i inventory.ini deploy.yml
+#
+# Tags:
+#   ansible-playbook -i inventory.ini deploy.yml --tags code    # Only update code
+#   ansible-playbook -i inventory.ini deploy.yml --tags config  # Only update config
+#   ansible-playbook -i inventory.ini deploy.yml --tags restart # Restart services
+
+- name: Deploy Axon Browser Worker
+  hosts: workers
+  become: yes
+  vars:
+    project_dir: /opt/axon/browser-worker
+    data_dir: /data
+    axon_user: axon
+
+  tasks:
+    # ========== Wait for cloud-init ==========
+    - name: Wait for cloud-init to complete
+      wait_for:
+        path: /var/lib/cloud/instance/axon-init-complete
+        timeout: 600
+      tags: [init]
+
+    # ========== Clone/Update Code ==========
+    - name: Clone browser-worker repository
+      git:
+        repo: "{{ repo_url }}"
+        dest: "{{ project_dir }}"
+        version: "{{ repo_branch }}"
+        force: yes
+      become_user: "{{ axon_user }}"
+      tags: [code]
+
+    - name: Set ownership
+      file:
+        path: "{{ project_dir }}"
+        owner: "{{ axon_user }}"
+        group: "{{ axon_user }}"
+        recurse: yes
+      tags: [code]
+
+    # ========== Python Environment ==========
+    - name: Create virtual environment
+      command: python3 -m venv {{ project_dir }}/.venv
+      args:
+        creates: "{{ project_dir }}/.venv/bin/python"
+      become_user: "{{ axon_user }}"
+      tags: [code, venv]
+
+    - name: Install Python dependencies
+      pip:
+        requirements: "{{ project_dir }}/requirements.txt"
+        virtualenv: "{{ project_dir }}/.venv"
+      become_user: "{{ axon_user }}"
+      tags: [code, venv]
+
+    # ========== Configuration ==========
+    - name: Create config.yaml
+      template:
+        src: config.yaml.j2
+        dest: "{{ project_dir }}/config.yaml"
+        owner: "{{ axon_user }}"
+        group: "{{ axon_user }}"
+        mode: '0644'
+      tags: [config]
+      notify: Restart browser-worker
+
+    # ========== Systemd Services ==========
+    - name: Create browser-worker service
+      template:
+        src: browser-worker.service.j2
+        dest: /etc/systemd/system/browser-worker.service
+        mode: '0644'
+      tags: [service]
+      notify:
+        - Reload systemd
+        - Restart browser-worker
+
+    - name: Enable browser-worker service
+      systemd:
+        name: browser-worker
+        enabled: yes
+      tags: [service]
+
+    # ========== Start Services ==========
+    - name: Start browser-worker
+      systemd:
+        name: browser-worker
+        state: started
+      tags: [service, restart]
+
+    # ========== Health Check ==========
+    - name: Wait for worker API to be ready
+      uri:
+        url: http://127.0.0.1:8080/health
+        method: GET
+      register: health_check
+      until: health_check.status == 200
+      retries: 30
+      delay: 2
+      tags: [verify]
+
+    - name: Print health status
+      debug:
+        msg: "Worker is healthy: {{ health_check.json }}"
+      tags: [verify]
+
+  handlers:
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Restart browser-worker
+      systemd:
+        name: browser-worker
+        state: restarted

@@ -1,0 +1,30 @@
+{
+  "metrics": {
+    "url": "https://github.com/trending",
+    "final_url": "https://github.com/trending",
+    "title": "Trending repositories on GitHub today · GitHub",
+    "blocked": false,
+    "block_reason": null,
+    "page_fingerprint": {
+      "element_count": 3349,
+      "link_count": 1192,
+      "image_count": 57,
+      "form_count": 3,
+      "input_count": 11
+    },
+    "element_count": 12
+  },
+  "detection": {
+    "blocked": false,
+    "block_reason": null,
+    "final_url": "https://github.com/trending",
+    "page_title": "Trending repositories on GitHub today · GitHub",
+    "page_fingerprint": {
+      "element_count": 3349,
+      "link_count": 1192,
+      "image_count": 57,
+      "form_count": 3,
+      "input_count": 11
+    }
+  }
+}
